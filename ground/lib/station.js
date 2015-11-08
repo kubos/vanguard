@@ -11,11 +11,13 @@ import path from 'path';
 import Promise from 'promise';
 import serialport, { SerialPort } from 'serialport';
 import { spawn, fork } from 'child_process';
+import sudo from 'sudo';
 import util from 'util';
 import uuid from 'uuid';
 
 import log from './log';
 import { Parser as VgParser, Message } from './parsers/vanguard';
+import { Parser as AprsParser } from './parsers/aprs';
 import * as vanguard from './parsers/vanguard';
 import { Parser as NmeaParser } from './parsers/nmea';
 import * as repl from './repl';
@@ -91,11 +93,8 @@ export class Station extends EventEmitter {
 
   checkRadio() {
     return new Promise((resolve, reject) => {
-      if (this.radioDevice || this.mock) {
-        resolve(this.radioDevice);
-        return;
-      }
-      this.detectRadio(resolve, reject);
+      resolve();
+      return;
     });
   }
 
@@ -133,13 +132,6 @@ export class Station extends EventEmitter {
 
   openRadio() {
     return new Promise((resolve, reject) => {
-      if (this.radioDevice === '-') {
-        this.radioIn = process.stdin;
-        this.radioOut = null;
-        process.stdin.once('readable', resolve);
-        return;
-      }
-
       if (this.mock) {
         let proc = spawn(process.execPath,
                          [__dirname + '/../mock/mock-balloon.js']);
@@ -148,6 +140,14 @@ export class Station extends EventEmitter {
         resolve();
         return;
       }
+
+      let dir = path.join(__dirname, '..', '..', '..', 'tools', 'rtlfm_demod.sh');
+      let proc = spawn('/bin/bash',[dir]);
+
+      this.radioIn = proc.stdout;
+      this.radioOut = null;
+      process.stdin.once('readable', resolve);
+      return;
 
       log.info('Serial device: %s, baudrate: %d', this.radioDevice, this.radioBaud);
       var port = new SerialPort(this.radioDevice, {
@@ -178,7 +178,7 @@ export class Station extends EventEmitter {
     this.checkRadio()
         .then(this.openRadio())
         .then(() => {
-          this.startParser(this.radioIn, 'radio', VgParser);
+          this.startParser(this.radioIn, 'radio', AprsParser);
         })
         .catch(err => {
           log.error(err);
@@ -195,6 +195,10 @@ export class Station extends EventEmitter {
     stream.pipe(parser);
   }
 
+  sendMessage(msg) { //modulation through python AFSK 
+    spawn('/bin/bash', [path.join(__dirname, '..', '..', 'lib', 'modulate_data.sh'), this.aprsClient.user, msg]);
+  }
+
   handleMessage(source, msg) {
     this.lastMsg.__all__ = msg;
     this.lastMsg[msg.type] = msg;
@@ -208,7 +212,7 @@ export class Station extends EventEmitter {
     if (msg.type === 'location') {
       this.aprsPublish(msg);
     }
-    if (msg.type === 'program-result'){
+    if (msg.type === 'program-result') {
       this.handleResult(msg);
     }
   }
@@ -232,28 +236,28 @@ export class Station extends EventEmitter {
     }
   }
 
-  handleResult(msg){
+  handleResult(msg) {
     let programDir = path.join('/tmp', 'vanguard', 'uploads', 'results', msg.programName);
     let chunkName = 'chunk' + msg.chunk + '.dat';
     let chunkPath = path.join(programDir, chunkName);
     let indexFile = path.join(programDir, 'index.kbf');
     log.debug('Received chunk %d of %d for program %s', msg.chunk, msg.chunkCount, msg.programName);
 
-    if(!fs.existsSync(programDir)){ // first result msg for program
+    if(!fs.existsSync(programDir)) { // first result msg for program
       mkdirp.sync(programDir);
       fs.writeFileSync(chunkPath, msg.programData);
       let size = 2 + msg.chunkCount;
       let buf = new BufferOffset(size);
       buf.appendInt8(msg.chunkCount);
       let boolArr =[];
-      for(let x = 0; x < msg.chunkCount; x++){
+      for(let x = 0; x < msg.chunkCount; x++) {
         boolArr.push(false);
       }
       boolArr[msg.index] = true;
       buf.append(new Buffer(boolArr));
       fs.writeFileSync(indexFile, buf); 
 
-      if(msg.chunkCount === 1){
+      if(msg.chunkCount === 1) {
         this.assembleFile(msg);
       }
     } else { // partially received program
@@ -262,9 +266,9 @@ export class Station extends EventEmitter {
       let readSize = resultBuffer.getInt8();
       let tempVal = 0;
       let resultArr = [];
-      for (let y = 0; y < readSize; y++){
+      for (let y = 0; y < readSize; y++) {
         tempVal = resultBuffer.getInt8();
-        if(tempVal === 1){
+        if(tempVal === 1) {
           resultArr.push(true);
         } else {
           resultArr.push(false);
@@ -276,17 +280,17 @@ export class Station extends EventEmitter {
       updatedBuffer.appendInt8(msg.chunkCount);
       updatedBuffer.append(new Buffer(resultArr));
       fs.writeFileSync(indexFile, updatedBuffer); 
-      if(resultArr.every(elem => elem == true) ){
+      if(resultArr.every(elem => elem == true)) {
         this.assembleFile(msg);
       }
     }
   }
 
-  assembleFile(msg){
+  assembleFile(msg) {
     let fileString = '', chunkPath = '', chunkFileName = '';
     let programDir = path.join('/tmp', 'vanguard', 'uploads', 'results', msg.programName);
     let stdoutFile = path.join(programDir, 'stdout.log');
-    for(let x = 1; x <= msg.chunkCount; x++){
+    for(let x = 1; x <= msg.chunkCount; x++) {
       chunkFileName = 'chunk' + x + '.dat';
       chunkPath = path.join(programDir, chunkFileName)
       fileString = fs.readFileSync(chunkPath);
@@ -307,11 +311,6 @@ export class Station extends EventEmitter {
 
   ping(magic) {
     return new Promise((resolve, reject) => {
-      if (!this.radioOut) {
-        reject('Radio output not connected');
-        return;
-      }
-
       var self = this;
       this.on('message', function handler(msg) {
         if (msg.type === 'pong' && msg.magic === magic) {
@@ -320,13 +319,52 @@ export class Station extends EventEmitter {
         }
       });
 
-      this.radioOut.write(new Buffer(Message.fromPing({ magic })));
+      this.options = { //for sudo
+          cachePassword: true,
+          prompt: 'Password:',
+          spawnOptions: { }
+      };
+
+      let pingListenerDir = path.join(__dirname, '..', '..', 'lib', 'pingListener.py');
+      let pingListener = sudo(['python', '-u', pingListenerDir], this.options); //must execute as root to access /dev/tun0
+       
+      pingListener.stdout.on('data', packet => {
+        if(packet.length === 57) {  //ping packets to ip fe80:.. are exactly 57 bytes. Filter other packets that are received.
+          log.debug('transmitting ping packet: ' + packet.toString('hex'));
+          this.sendMessage(new Buffer(packet));
+          pingListener.kill();
+          resolve();    // Going to change when pong message functionality is added.
+        } 
+      });
+
+      pingListener.stdout.once('data', data => {
+        this.assignIp();
+      });    
+
     });
+  }
+
+  assignIp() {
+    let ifconfigCmd = ['ifconfig', 'tun0', 'inet6', 'fe80::1234'];       //Assign the tun0 interface an ip address
+    let ifconfig = sudo(ifconfigCmd, this.options); 
+    
+    ifconfig.stdout.once('readable', () => {
+        this.spawnPing();
+    });
+  }
+
+  spawnPing() {
+    let pingCmd = 'ping6';  
+    let pingCmdArgs = '-c1';     
+    let tunInterface = 'tun0';
+    let balloonIpAddr = 'fe80::aebc:32ff:fe79:57b1'; 
+    let pingArgs = [pingCmdArgs, balloonIpAddr.concat('%', tunInterface)];
+    spawn('ping6', pingArgs);
   }
 
   upload(filePath) {
     return new Promise((resolve, reject) => { 
-      if (!this.radioOut){
+      if (!this.radioOut) {
         reject('Radio output not Connected');
         return;
       }
@@ -340,13 +378,13 @@ export class Station extends EventEmitter {
       let programDataStr = fs.readFileSync(filePath, "utf8");
       let stagingDir = path.join(path.dirname(path.dirname(__dirname)), 'uploads', 'sendStaging', programName);
       
-      if (!fs.existsSync(stagingDir)){
+      if (!fs.existsSync(stagingDir)) {
         mkdirp.sync(stagingDir);
       }
       let offset = 0;
-      fs.open(filePath, 'r', function(err, fd){
-        for(let x = 0; x < numChunks; x++){
-           if(size < maxDataLength){
+      fs.open(filePath, 'r', function(err, fd) {
+        for(let x = 0; x < numChunks; x++) {
+           if(size < maxDataLength) {
               maxDataLength = size; //prevent reading more bytes than the file
             }
             let chunkName = 'chunk' + x + '.dat';
@@ -360,14 +398,14 @@ export class Station extends EventEmitter {
       log.debug('Split file %s into %d chunks..', programName, numChunks);
       
       let self = this;
-      this.on('message', function handler(msg){
-        if(msg.type === 'program-result'){    
+      this.on('message', function handler(msg) {
+        if(msg.type === 'program-result') {    
           self.removeListener('message', handler);
           resolve(msg);
         }
       });
 
-      for(let x = 0; x < numChunks; x++){
+      for(let x = 0; x < numChunks; x++) {
         let chunkName = 'chunk' + x + '.dat'
         let chunkPath = path.join(stagingDir, chunkName);
         let chunkDataStr = fs.readFileSync(chunkPath);
