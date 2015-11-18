@@ -1,5 +1,6 @@
 Project Vanguard
 ========
+[![Build Status](https://travis-ci.org/openkosmosorg/vanguard.svg?branch=master)](https://travis-ci.org/openkosmosorg/vanguard)
 
 A space program for the Web
 
