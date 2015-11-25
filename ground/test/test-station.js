@@ -20,6 +20,7 @@ describe('lib/station', () => {
       .then(test.value(station.radioDevConnected).isFalse())
       .then(station.checkRadio())
       .then( () => { test.value(station.radioDevConnected).isTrue()})
-      .then(done());
+      .then(done())
+      .then(station.onExit());
 	});
 });
