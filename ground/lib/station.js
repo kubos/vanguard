@@ -187,9 +187,21 @@ export class Station extends EventEmitter {
     });
   }
 
+  openSerialDevice() {
+    return new Promise((resolve, reject) => {
+      this.serialPort = new SerialPort(this.radioDevice, {
+        baudrate: this.radioBaud
+      });
+
+      this.serialPort.on('open', resolve);
+    });
+  }
+
+
   start() {
     this.checkRadio()
         .then(this.openRadio())
+        .then(this.openSerialDevice())
         .then(() => {
           this.startParser(this.radioIn, 'radio', AprsParser);
         })
@@ -209,7 +221,14 @@ export class Station extends EventEmitter {
   }
 
   sendMessage(msg) { //modulation through python AFSK 
-    spawn('/bin/bash', [path.join(__dirname, '..', '..', 'lib', 'modulate_data.sh'), this.aprsClient.user, msg]);
+    this.serialPort.write("H\n");
+    let modulationProc = spawn('/bin/bash', [path.join(__dirname, '..', '..', 'lib', 'modulate_data.sh'), this.aprsClient.user, msg]);
+
+    modulationProc.stderr.on('data', data => {
+      if(data.toString().indexOf('Done.') != -1) { //Python AFSK prints 'Done.' before gracefully exiting
+        this.serialPort.write("L\n");
+      }
+    });
   }
 
   handleMessage(source, msg) {
