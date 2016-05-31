@@ -62,6 +62,7 @@ export class Station extends EventEmitter {
       pass: '16287'
     });
     this.aprsLast = null;
+    this.radioDevConnected = false;
 
     this.startServers();
     log.info('Ground station listening');
@@ -96,13 +97,14 @@ export class Station extends EventEmitter {
     return new Promise((resolve, reject) => {
       let dir = path.join(__dirname, '..', '..', '..', 'tools', 'rtlfm_demod.sh');
       let proc = spawn('/bin/bash', [dir]);
-    
+
       proc.stderr.on('data', data => {
         let dataStr = data.toString();
         if (dataStr.indexOf('No supported devices found') != -1) {
           log.debug('No Radio Receiver Detected');
           reject();
         } else if (dataStr.indexOf('Found') != -1) {
+          this.radioDevConnected = true;
           log.debug('Radio Receiver Device Found');
           proc.kill();
           resolve();
